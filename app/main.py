@@ -197,22 +197,6 @@ def me(x_telegram_init_data: str | None = Header(default=None)):
             "is_admin": telegram_id == ADMIN_TELEGRAM_ID,
         }
 
-@app.get("/api/admin/summary")
-def admin_summary(x_telegram_init_data: str | None = Header(default=None)):
-    telegram_id = telegram_user(x_telegram_init_data)
-    require_admin(telegram_id)
-    with Session(engine) as db:
-        all_orders = db.scalars(select(Order)).all()
-        paid = [order for order in all_orders if order.status == "paid"]
-        users = len({order.telegram_id for order in all_orders})
-        revenue = sum(float(PLANS.get(order.plan, {}).get("price", 0)) for order in paid)
-        return {
-            "orders_total": len(all_orders),
-            "paid_total": len(paid),
-            "users_total": users,
-            "revenue_usdt": f"{revenue:.2f}",
-        }
-
 @app.post("/api/terms/accept")
 def accept_terms(x_telegram_init_data: str | None = Header(default=None)):
     telegram_id = telegram_user(x_telegram_init_data)
