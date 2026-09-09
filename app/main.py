@@ -71,6 +71,19 @@ class SupportTicket(Base):
     status: Mapped[str] = mapped_column(String(20), default="open")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
+class DemoRun(Base):
+    __tablename__ = "demo_runs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    telegram_id: Mapped[int] = mapped_column(index=True)
+    accounts: Mapped[str] = mapped_column(String(40))
+    mode: Mapped[str] = mapped_column(String(12))
+    interval_minutes: Mapped[int] = mapped_column(Integer)
+    cycle: Mapped[int] = mapped_column(Integer, default=1)
+    sent_count: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(12), default="active")
+    telegram_message_id: Mapped[int | None] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
 class TermsAcceptance(Base):
     __tablename__ = "terms_acceptances"
     telegram_id: Mapped[int] = mapped_column(primary_key=True)
@@ -102,6 +115,11 @@ class SupportMessage(BaseModel):
 
 class SupportReply(BaseModel):
     message: str
+
+class DemoRunStart(BaseModel):
+    accounts: list[int]
+    mode: str
+    interval_minutes: int
 
 def telegram_user(init_data: str | None) -> int:
     if not init_data:
@@ -290,6 +308,62 @@ async def reply_ticket(ticket_id: int, body: SupportReply, x_telegram_init_data:
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": recipient, "text": f"💬 <b>Ответ поддержки</b>\n\n{reply}", "parse_mode": "HTML"})
         response.raise_for_status()
+    return {"ok": True}
+
+def demo_text(run: DemoRun) -> str:
+    accounts = ", ".join(str(index + 1) for index in json.loads(run.accounts))
+    return (f"🟣 <b>Визуальная рассылка #{run.id}</b>\n\n"
+            f"🔄 Цикл: <b>{run.cycle}</b>\n"
+            f"💬 Условно отправлено: <b>{run.sent_count}</b> чатов\n"
+            f"👤 Аккаунты: {accounts}\n"
+            f"🛡 Режим: {'Безопасный' if run.mode == 'safe' else 'Обычный'}\n\n"
+            f"{'⏹ Симуляция завершена' if run.status == 'stopped' else '▶️ Выполняется визуальная симуляция'}")
+
+async def publish_demo(run: DemoRun):
+    if not BOT_TOKEN or not run.telegram_message_id:
+        return
+    markup = {"inline_keyboard": [[{"text": "⏹ Завершить рассылку", "callback_data": f"demo_stop_{run.id}"}]]} if run.status == "active" else None
+    async with httpx.AsyncClient(timeout=15) as client:
+        await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", json={"chat_id": run.telegram_id, "message_id": run.telegram_message_id, "text": demo_text(run), "parse_mode": "HTML", "reply_markup": markup})
+
+@app.get("/api/demo-runs")
+async def demo_runs(x_telegram_init_data: str | None = Header(default=None)):
+    user_id = telegram_user(x_telegram_init_data)
+    with Session(engine) as db:
+        runs = db.scalars(select(DemoRun).where(DemoRun.telegram_id == user_id, DemoRun.status == "active")).all()
+        for run in runs:
+            run.cycle += 1
+            run.sent_count += len(json.loads(run.accounts)) * 2
+        db.commit()
+        data = [{"id": run.id, "accounts": json.loads(run.accounts), "mode": run.mode, "interval_minutes": run.interval_minutes, "cycle": run.cycle, "sent_count": run.sent_count, "status": run.status} for run in runs]
+        for run in runs:
+            await publish_demo(run)
+    return data
+
+@app.post("/api/demo-runs")
+async def start_demo_run(body: DemoRunStart, x_telegram_init_data: str | None = Header(default=None)):
+    user_id = telegram_user(x_telegram_init_data)
+    require_terms(user_id)
+    if body.mode not in ("normal", "safe") or not body.accounts or any(i not in (0, 1, 2) for i in body.accounts):
+        raise HTTPException(422, "Некорректные параметры визуального запуска.")
+    with Session(engine) as db:
+        run = DemoRun(telegram_id=user_id, accounts=json.dumps(sorted(set(body.accounts))), mode=body.mode, interval_minutes=body.interval_minutes)
+        db.add(run); db.commit(); db.refresh(run)
+        if BOT_TOKEN:
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": user_id, "text": demo_text(run), "parse_mode": "HTML", "reply_markup": {"inline_keyboard": [[{"text": "⏹ Завершить рассылку", "callback_data": f"demo_stop_{run.id}"}]]}})
+                if response.is_success:
+                    run.telegram_message_id = response.json()["result"]["message_id"]; db.commit()
+        return {"id": run.id}
+
+@app.post("/api/demo-runs/{run_id}/stop")
+async def stop_demo_run(run_id: int, x_telegram_init_data: str | None = Header(default=None)):
+    user_id = telegram_user(x_telegram_init_data)
+    with Session(engine) as db:
+        run = db.get(DemoRun, run_id)
+        if not run or run.telegram_id != user_id: raise HTTPException(404, "Запуск не найден.")
+        run.status = "stopped"; db.commit(); db.refresh(run)
+        await publish_demo(run)
     return {"ok": True}
 
 @app.post("/api/keys/activate")
