@@ -235,7 +235,7 @@ async def telegram_webhook(secret: str, request: Request, x_telegram_bot_api_sec
         raise HTTPException(404, "Не найдено")
     update = await request.json()
     message = update.get("message", {})
-    if not message.get("text", "").startswith("/start") or not WEBAPP_URL or not BOT_TOKEN:
+    if not message.get("text", "").startswith("/start") or not BOT_TOKEN:
         return {"ok": True}
     chat_id = message.get("chat", {}).get("id")
     if not chat_id:
@@ -243,7 +243,7 @@ async def telegram_webhook(secret: str, request: Request, x_telegram_bot_api_sec
     text = ("👋 <b>Добро пожаловать!</b>\n\n"
             "Здесь можно ознакомиться с сервисом, принять соглашение и выбрать лицензию. "
             "Нажмите кнопку ниже, чтобы открыть приложение.")
-    keyboard = {"inline_keyboard": [[{"text": "🚀 Запустить", "web_app": {"url": WEBAPP_URL}}]]}
+    # Always open the same public Railway service that received /start.\n    web_app_url = str(request.base_url).rstrip("/")\n    keyboard = {"inline_keyboard": [[{"text": "🚀 Запустить", "web_app": {"url": web_app_url}}]]}
     async with httpx.AsyncClient(timeout=15) as client:
         await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": keyboard})
     return {"ok": True}
