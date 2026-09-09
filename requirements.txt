@@ -1,0 +1,8 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+sqlalchemy==2.0.36
+httpx==0.28.1
+pydantic-settings==2.7.0
+# SQLAlchemy uses the psycopg2 dialect for Railway's postgresql:// URL.
+psycopg2-binary==2.9.10
+python-dotenv==1.0.1
