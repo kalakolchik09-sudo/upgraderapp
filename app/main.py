@@ -14,7 +14,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy import DateTime, Integer, String, create_engine, select, text
+from sqlalchemy import DateTime, Integer, String, create_engine, select, text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 ROOT = Path(__file__).parent
@@ -27,6 +27,7 @@ CRYPTO_WEBHOOK_SECRET = os.getenv("CRYPTO_WEBHOOK_SECRET", "")
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
 WEBAPP_URL = os.getenv("WEBAPP_URL", "")
 DEV_TELEGRAM_ID = os.getenv("DEV_TELEGRAM_ID", "")
+ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "964442694"))
 
 PLANS = {
     "week": {"name": "7 дней", "days": 7, "price": "3.00"},
@@ -125,6 +126,10 @@ def require_terms(telegram_id: int):
     if not accepted(telegram_id):
         raise HTTPException(403, "Сначала примите пользовательское соглашение.")
 
+def require_admin(telegram_id: int):
+    if telegram_id != ADMIN_TELEGRAM_ID:
+        raise HTTPException(403, "Раздел доступен только администратору.")
+
 async def activate(invoice_id: str) -> Order | None:
     invoice = await crypto("getInvoices", {"invoice_ids": invoice_id})
     items = invoice.get("items", [])
@@ -165,6 +170,23 @@ def me(x_telegram_init_data: str | None = Header(default=None)):
             "license_key": latest.license_key if latest else None,
             "expires_at": latest.expires_at if latest else None,
             "purchases": len(orders),
+            "is_admin": telegram_id == ADMIN_TELEGRAM_ID,
+        }
+
+@app.get("/api/admin/summary")
+def admin_summary(x_telegram_init_data: str | None = Header(default=None)):
+    telegram_id = telegram_user(x_telegram_init_data)
+    require_admin(telegram_id)
+    with Session(engine) as db:
+        all_orders = db.scalars(select(Order)).all()
+        paid = [order for order in all_orders if order.status == "paid"]
+        users = len({order.telegram_id for order in all_orders})
+        revenue = sum(float(PLANS.get(order.plan, {}).get("price", 0)) for order in paid)
+        return {
+            "orders_total": len(all_orders),
+            "paid_total": len(paid),
+            "users_total": users,
+            "revenue_usdt": f"{revenue:.2f}",
         }
 
 @app.post("/api/terms/accept")
@@ -200,7 +222,6 @@ async def checkout(body: Checkout, x_telegram_init_data: str | None = Header(def
     invoice = await crypto("createInvoice", {
         "asset": "USDT", "amount": plan["price"], "description": f"Лицензия: {plan['name']}",
         "payload": json.dumps({"telegram_id": telegram_id, "plan": body.plan}),
-        **({"paid_btn_name": "openBot", "paid_btn_url": WEBHOOK_URL} if WEBHOOK_URL else {}),
     })
     with Session(engine) as db:
         db.add(Order(telegram_id=telegram_id, plan=body.plan, invoice_id=str(invoice["invoice_id"])))
@@ -228,9 +249,10 @@ async def crypto_webhook(secret: str, request: Request):
     if not CRYPTO_WEBHOOK_SECRET or not hmac.compare_digest(secret, CRYPTO_WEBHOOK_SECRET):
         raise HTTPException(404, "Не найдено")
     data = await request.json()
-    update = data.get("payload", data)
-    if update.get("update_type") == "invoice_paid":
-        invoice_id = str(update.get("payload", {}).get("invoice_id", ""))
+    # Crypto Pay sends {update_type: "invoice_paid", payload: {invoice_id: ...}}.
+    # Re-checking the invoice against the API inside activate() makes delivery idempotent.
+    if data.get("update_type") == "invoice_paid":
+        invoice_id = str(data.get("payload", {}).get("invoice_id", ""))
         if invoice_id:
             await activate(invoice_id)
     return {"ok": True}
