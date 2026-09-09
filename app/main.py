@@ -2,6 +2,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import DateTime, Integer, String, create_engine, select, text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).parent
 load_dotenv()
@@ -376,5 +380,8 @@ async def telegram_webhook(secret: str, request: Request, x_telegram_bot_api_sec
     web_app_url = str(request.base_url).rstrip("/")
     keyboard = {"inline_keyboard": [[{"text": "🚀 Запустить", "web_app": {"url": web_app_url}}]]}
     async with httpx.AsyncClient(timeout=15) as client:
-        await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": keyboard})
+        response = await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": keyboard})
+        if not response.is_success:
+            logger.error("Telegram /start reply failed: %s", response.text)
+            response.raise_for_status()
     return {"ok": True}
