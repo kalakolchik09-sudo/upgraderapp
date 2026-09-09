@@ -52,6 +52,21 @@ class Order(Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
+class ManualLicenseKey(Base):
+    __tablename__ = "manual_license_keys"
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    duration_days: Mapped[int] = mapped_column(Integer)
+    used_by: Mapped[int | None] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+class SupportTicket(Base):
+    __tablename__ = "support_tickets"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    telegram_id: Mapped[int] = mapped_column(index=True)
+    message: Mapped[str] = mapped_column(String(2000))
+    status: Mapped[str] = mapped_column(String(20), default="open")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
 class TermsAcceptance(Base):
     __tablename__ = "terms_acceptances"
     telegram_id: Mapped[int] = mapped_column(primary_key=True)
@@ -74,6 +89,15 @@ class Checkout(BaseModel):
 
 class KeyActivation(BaseModel):
     key: str
+
+class ManualKeyCreate(BaseModel):
+    duration_days: int
+
+class SupportMessage(BaseModel):
+    message: str
+
+class SupportReply(BaseModel):
+    message: str
 
 def telegram_user(init_data: str | None) -> int:
     if not init_data:
@@ -198,16 +222,106 @@ def accept_terms(x_telegram_init_data: str | None = Header(default=None)):
             db.commit()
     return {"ok": True}
 
+@app.get("/api/admin/summary")
+def admin_summary(x_telegram_init_data: str | None = Header(default=None)):
+    telegram_id = telegram_user(x_telegram_init_data)
+    require_admin(telegram_id)
+    with Session(engine) as db:
+        orders = db.scalars(select(Order)).all()
+        paid = [order for order in orders if order.status == "paid"]
+        return {
+            "orders_total": len(orders),
+            "paid_total": len(paid),
+            "users_total": len({order.telegram_id for order in orders}),
+            "revenue_usdt": f"{sum(float(PLANS.get(order.plan, {}).get('price', 0)) for order in paid):.2f}",
+        }
+
+@app.post("/api/admin/keys")
+def create_manual_key(body: ManualKeyCreate, x_telegram_init_data: str | None = Header(default=None)):
+    telegram_id = telegram_user(x_telegram_init_data)
+    require_admin(telegram_id)
+    if body.duration_days != -1 and body.duration_days < 1:
+        raise HTTPException(422, "Укажите число дней или -1 для бессрочного ключа.")
+    new_key = key()
+    with Session(engine) as db:
+        db.add(ManualLicenseKey(key=new_key, duration_days=body.duration_days))
+        db.commit()
+    return {"key": new_key, "duration_days": body.duration_days}
+
+@app.get("/api/admin/users")
+def admin_users(x_telegram_init_data: str | None = Header(default=None)):
+    telegram_id = telegram_user(x_telegram_init_data)
+    require_admin(telegram_id)
+    with Session(engine) as db:
+        ids = {row[0] for row in db.execute(select(Order.telegram_id)).all()}
+        ids.update(row[0] for row in db.execute(select(TermsAcceptance.telegram_id)).all())
+        result = []
+        for user_id in sorted(ids, reverse=True)[:100]:
+            latest = db.scalar(select(Order).where(Order.telegram_id == user_id, Order.status == "paid").order_by(Order.created_at.desc()))
+            result.append({"telegram_id": user_id, "license_key": latest.license_key if latest else None, "expires_at": latest.expires_at if latest else None})
+    return result
+
+@app.get("/api/admin/tickets")
+def admin_tickets(x_telegram_init_data: str | None = Header(default=None)):
+    telegram_id = telegram_user(x_telegram_init_data)
+    require_admin(telegram_id)
+    with Session(engine) as db:
+        tickets = db.scalars(select(SupportTicket).order_by(SupportTicket.created_at.desc()).limit(30)).all()
+        return [{"id": ticket.id, "telegram_id": ticket.telegram_id, "message": ticket.message, "status": ticket.status, "created_at": ticket.created_at} for ticket in tickets]
+
+@app.post("/api/support")
+async def create_ticket(body: SupportMessage, x_telegram_init_data: str | None = Header(default=None)):
+    telegram_id = telegram_user(x_telegram_init_data)
+    message = body.message.strip()
+    if not message:
+        raise HTTPException(422, "Напишите сообщение для поддержки.")
+    with Session(engine) as db:
+        ticket = SupportTicket(telegram_id=telegram_id, message=message)
+        db.add(ticket)
+        db.commit()
+        db.refresh(ticket)
+    if BOT_TOKEN:
+        async with httpx.AsyncClient(timeout=15) as client:
+            await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": ADMIN_TELEGRAM_ID, "text": f"🆘 Обращение #{ticket.id} от <code>{telegram_id}</code>\n\n{message}", "parse_mode": "HTML"})
+    return {"ticket_id": ticket.id}
+
+@app.post("/api/admin/tickets/{ticket_id}/reply")
+async def reply_ticket(ticket_id: int, body: SupportReply, x_telegram_init_data: str | None = Header(default=None)):
+    telegram_id = telegram_user(x_telegram_init_data)
+    require_admin(telegram_id)
+    reply = body.message.strip()
+    if not reply:
+        raise HTTPException(422, "Введите ответ.")
+    with Session(engine) as db:
+        ticket = db.get(SupportTicket, ticket_id)
+        if not ticket:
+            raise HTTPException(404, "Обращение не найдено.")
+        ticket.status = "answered"
+        recipient = ticket.telegram_id
+        db.commit()
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": recipient, "text": f"💬 <b>Ответ поддержки</b>\n\n{reply}", "parse_mode": "HTML"})
+        response.raise_for_status()
+    return {"ok": True}
+
 @app.post("/api/keys/activate")
 def activate_key(body: KeyActivation, x_telegram_init_data: str | None = Header(default=None)):
     telegram_id = telegram_user(x_telegram_init_data)
     require_terms(telegram_id)
     supplied = body.key.strip().upper()
     with Session(engine) as db:
+        manual = db.get(ManualLicenseKey, supplied)
+        if manual:
+            if manual.used_by:
+                raise HTTPException(409, "Этот ключ уже активирован.")
+            expiry = None if manual.duration_days == -1 else datetime.now(timezone.utc) + timedelta(days=manual.duration_days)
+            db.add(Order(telegram_id=telegram_id, plan="manual", invoice_id=f"manual-{supplied}", status="paid", license_key=supplied, expires_at=expiry))
+            manual.used_by = telegram_id
+            db.commit()
+            return {"key": supplied, "expires_at": expiry}
         order = db.scalar(select(Order).where(Order.license_key == supplied, Order.status == "paid"))
         if not order:
             raise HTTPException(404, "Ключ не найден или ещё не оплачен.")
-        # A key is intentionally transferable: its holder may activate it for their own profile.
         order.telegram_id = telegram_id
         db.commit()
         return {"key": order.license_key, "expires_at": order.expires_at}
