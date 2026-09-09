@@ -376,8 +376,16 @@ async def telegram_webhook(secret: str, request: Request, x_telegram_bot_api_sec
     text = ("👋 <b>Добро пожаловать!</b>\n\n"
             "Здесь можно ознакомиться с сервисом, принять соглашение и выбрать лицензию. "
             "Нажмите кнопку ниже, чтобы открыть приложение.")
-    # Always open the same public Railway service that received /start.
-    web_app_url = str(request.base_url).rstrip("/")
+    # Railway terminates HTTPS at its proxy. Rebuild the public HTTPS address
+    # from forwarded headers instead of using the internal http:// container URL.
+    forwarded_host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+    forwarded_proto = (request.headers.get("x-forwarded-proto") or "https").split(",")[0].strip()
+    web_app_url = f"{forwarded_proto}://{forwarded_host}" if forwarded_host else WEBAPP_URL
+    if not web_app_url.startswith("https://"):
+        web_app_url = WEBAPP_URL
+    if not web_app_url or not web_app_url.startswith("https://"):
+        logger.error("No valid public HTTPS WEBAPP_URL is configured.")
+        return {"ok": True}
     keyboard = {"inline_keyboard": [[{"text": "🚀 Запустить", "web_app": {"url": web_app_url}}]]}
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": keyboard})
