@@ -14,7 +14,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy import DateTime, Integer, String, create_engine, select
+from sqlalchemy import DateTime, Integer, String, create_engine, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 ROOT = Path(__file__).parent
@@ -56,7 +56,15 @@ class TermsAcceptance(Base):
     telegram_id: Mapped[int] = mapped_column(primary_key=True)
     accepted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
+# Create ORM tables and repair databases created by earlier application versions.
 Base.metadata.create_all(engine)
+with engine.begin() as connection:
+    connection.execute(text("""
+        CREATE TABLE IF NOT EXISTS terms_acceptances (
+            telegram_id BIGINT PRIMARY KEY,
+            accepted_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """))
 app = FastAPI(title="License mini app")
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
