@@ -274,7 +274,9 @@ async def telegram_webhook(secret: str, request: Request, x_telegram_bot_api_sec
     text = ("👋 <b>Добро пожаловать!</b>\n\n"
             "Здесь можно ознакомиться с сервисом, принять соглашение и выбрать лицензию. "
             "Нажмите кнопку ниже, чтобы открыть приложение.")
-    # Always open the same public Railway service that received /start.\n    web_app_url = str(request.base_url).rstrip("/")\n    keyboard = {"inline_keyboard": [[{"text": "🚀 Запустить", "web_app": {"url": web_app_url}}]]}
+    # Always open the same public Railway service that received /start.
+    web_app_url = str(request.base_url).rstrip("/")
+    keyboard = {"inline_keyboard": [[{"text": "🚀 Запустить", "web_app": {"url": web_app_url}}]]}
     async with httpx.AsyncClient(timeout=15) as client:
         await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": keyboard})
     return {"ok": True}
